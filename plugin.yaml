@@ -1,7 +1,7 @@
 name: follow-through
 version: 1.0.0
 description: "An agent never ends a turn on a promise. A final reply that says work has started or will happen, while nothing is running, is held and turned into a nudge: do it now, or actually launch it. Zero model calls, fail-open, max 2 nudges per turn. Disclosure — registers one llm_execution middleware that reads each final model reply and, when it promises work while nothing is running, rewrites it into a call to its own follow_through tool (at most 2 per user turn; FOLLOW_THROUGH_OFF=1 disables); no network, no subprocesses, no files read or written, no model calls, no telemetry."
-author: "Giulio Ricci (agenziamaia)"
+author: "Giulio Di Stefano (agenziamaia)"
 license: MIT
 provides_tools:
   - follow_through
