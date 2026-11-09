@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 *.bak
 *.iter*.bak
+.env
+.env.*
+*.pem
+*.key
+secrets/
+.venv/
