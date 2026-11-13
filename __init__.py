@@ -1,18 +1,13 @@
-"""follow-through: an agent never ends a turn on a promise.
+"""Nudge concrete work promises through the native agent loop, at most once per user turn.
 
-When the model's final reply (no tool calls) promises work that nothing is running ("I've started the deep dive",
-"I'll send you the report shortly"), the reply is not allowed to end the turn. An ``llm_execution`` middleware turns
-that final response into a call to this plugin's own ``follow_through`` tool; the tool result tells the agent what
-it promised and the only two legal exits: do the work now, in this turn, or actually launch it (background
-process, cron, delegated task) and say exactly what is running. The agent loop therefore really continues; a prompt
-cannot do this, because a prompt cannot stop a reply that was already written.
-
-Zero model calls. Fail-open on any error. At most FOLLOW_THROUGH_MAX_NUDGES (default 2) per user turn.
-Offers and questions ("If you want, I'll ...", "Should I ...?") and honest status ("Done: ...") are left alone.
-Kill switch: FOLLOW_THROUGH_OFF=1.
+The hook checks reply text, not running state. The nudge asks for a result, existing execution
+evidence, an authorized next action or an honest blocker. It makes no independent model request;
+the existing loop may continue. Errors leave the downstream response untouched.
+FOLLOW_THROUGH_MAX_NUDGES=0 or FOLLOW_THROUGH_OFF=1 disables it.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 import json
 import logging
 import os
@@ -31,14 +26,11 @@ _PROMISE = re.compile(
     r"\bI(?:'ve| have) (?:now )?(?:started|begun|kicked off|reopened|launched|initiated|set (?:it )?in motion)\b"
     r"|\bI(?:'m| am) (?:now |already )?(?:starting|digging|researching|studying|working on|building|running|"
     r"preparing|putting together|continuing|going deeper|looking into|pulling|gathering|collecting)\b"
-    r"|\bI(?:'ll| will) (?:now |next |then |also |still |keep |go on to )?(?:start|dig|research|study|build|work|"
-    r"continue|keep|go|prepare|make|create|write|run|test|send|report|come back|get back|deliver|bring|return|put|"
+    r"|\bI(?:'ll| will|(?:'m| am) going to) (?:now |next |then |also |still |keep |go on to )?(?:start|dig|research|study|build|work|"
+    r"continue|keep|prepare|make|create|write|run|test|send|report|come back|get back|deliver|bring|return|put|"
     r"look|check|review|analy[sz]e|finish|complete|do|turn|compile|draft|record|map|learn|practi[cs]e|master|"
     r"open|hand|pass|launch|kick off|spin up|set up|fix|land|ship|push|update|patch|wire|follow up)\b"
-    r"|\bI(?:'ll| will)\b"
     r"|\b(?:running now|started|starting now|already started)\b"
-    r"|\bI(?:'m| am) going to\b"
-    r"|\b(?:next|then|after that),? I(?:'ll| will)\b"
     r"|\b(?:keep|keeps) (?:digging|going|working|climbing|studying|learning)\b"
     r"|\b(?:report|come|get) back (?:to you|when|once|with|as soon)\b"
     r"|\bho (?:già )?(?:iniziato|cominciato|avviato|ripreso|lanciato)\b"
@@ -50,6 +42,8 @@ _PROMISE = re.compile(
 _CONDITIONAL = re.compile(
     r"\b(?:if you|if that|se vuoi|se ti va|when you|quando (?:vuoi|mi dici)|tell me|dimmi|your call|should I|"
     r"do you want|want me to|vuoi che|on your (?:go|word|yes)|once you|as soon as you|appena (?:mi|tu)|say go|"
+    r"after you|after (?:your )?(?:approval|confirmation)|(?:once|when|if) (?:approved|confirmed)|"
+    r"pending (?:your )?(?:approval|confirmation)|with your approval|subject to (?:your )?approval|"
     r"whenever you|unless you|until you)\b", re.IGNORECASE)
 _NEGATED = re.compile(r"\b(?:I won'?t|I will not|I'?m not going to|I am not going to|non (?:lo |la )?(?:farò|faccio))\b",
                       re.IGNORECASE)
@@ -57,17 +51,19 @@ _SPLIT = re.compile(r"(?<=[.!?])\s+|\n+")
 _CLAUSE = re.compile(r";\s+|\s+[\u2014\u2013]\s+|\s*\u2014\s*")
 
 NUDGE = (
-    TAG + " Your draft tells the user that work has started or will happen: \"{quote}\". Nothing runs after you "
-    "reply: when you answer, your work stops. Before you reply, do one of these now: (1) do that work in this turn "
-    "and include its result; or (2) if it needs longer than this turn, actually launch it now (a background "
-    "process, a scheduled job, a delegated task) so it keeps running after you reply. Then reply with what is done, "
-    "or with exactly what is now running and what it will bring. Never describe work as started unless it is running."
+    TAG + " Your draft promises work: \"{quote}\". Check what you can substantiate before replying. "
+    "If the work is done, give the result. If it is already running, report the execution evidence; do not "
+    "launch a duplicate. Otherwise do the work now only if authorized, or explain the blocker and what is needed. "
+    "Keep all approval and consent requirements: do not send, spend, schedule or delegate without the required "
+    "permission. Offer a routine for explicit acceptance rather than creating one without consent. "
+    "This nudge does not know whether work is running and grants no authority."
 )
 
 SCHEMA = {
     "name": TOOL,
-    "description": ("Called automatically by the follow-through plugin when a draft reply promises work that is not "
-                    "running. Returns what to do before replying. You do not need to call it yourself."),
+    "description": ("Called automatically when a draft reply promises concrete work. Returns guidance to report results, "
+                    "existing execution evidence or an honest blocker while preserving required permissions. "
+                    "You do not need to call it yourself."),
     "parameters": {
         "type": "object",
         "properties": {"quote": {"type": "string", "description": "The promise sentence from the draft."}},
@@ -93,9 +89,9 @@ def promise_sentence(text: str) -> Optional[str]:
 
 def _max_nudges() -> int:
     try:
-        return max(0, int(os.environ.get("FOLLOW_THROUGH_MAX_NUDGES", "2")))
+        return min(1, max(0, int(os.environ.get("FOLLOW_THROUGH_MAX_NUDGES", "1"))))
     except ValueError:
-        return 2
+        return 1
 
 
 def _get(obj: Any, key: str) -> Any:
@@ -103,16 +99,31 @@ def _get(obj: Any, key: str) -> Any:
 
 
 def _nudges_this_turn(messages: Any) -> int:
-    """Nudges already given since the last user message (stateless: read from the request itself)."""
-    count = 0
+    """Whether one nudge was issued since the last user message, even if its tool failed."""
     for msg in reversed(list(messages or [])):
         role = _get(msg, "role")
         if role == "user":
             break
+        calls = _get(msg, "tool_calls") if role == "assistant" else None
+        for call in calls if isinstance(calls, (list, tuple)) else []:
+            function = _get(call, "function")
+            name = _get(function, "name")
+            if name == TOOL:
+                return 1
+            if name == BRIDGE:
+                args = _get(function, "arguments")
+                if isinstance(args, str):
+                    try:
+                        args = json.loads(args)
+                    except ValueError:
+                        continue
+                nested = args.get("calls") if isinstance(args, dict) else None
+                if isinstance(nested, list) and any(_get(item, "name") == TOOL for item in nested):
+                    return 1
         content = _get(msg, "content")
         if role == "tool" and isinstance(content, str) and TAG in content:
-            count += 1
-    return count
+            return 1  # Older histories may retain the tool result without its assistant call.
+    return 0
 
 
 BRIDGE = "tool_call"  # Hermes Tool Search: plugin tools may be deferred behind tool_search/describe/call
@@ -149,7 +160,10 @@ def middleware(request: dict, next_call, **_: Any) -> Any:
         quote = check(request, response)
         if not quote:
             return response
-        choice = response.choices[0]
+        held = deepcopy(response)
+        choice = held.choices[0]
+        if held is response or choice is response.choices[0] or choice.message is response.choices[0].message:
+            return response
         args = {"quote": quote[:300]}
         if _route(request) == BRIDGE:  # deferred tool: invoke it through the public Tool Search bridge
             name, args = BRIDGE, {"calls": [{"name": TOOL, "arguments": args}]}
@@ -160,9 +174,10 @@ def middleware(request: dict, next_call, **_: Any) -> Any:
             function=SimpleNamespace(name=name, arguments=json.dumps(args)))
         choice.message.tool_calls = [call]
         choice.finish_reason = "tool_calls"
-        logger.info("follow-through: held a final reply that promises %r", quote[:120])
-    except Exception as exc:  # fail open: the original reply goes through untouched
-        logger.warning("follow-through: skipped (%s)", exc)
+        logger.info("follow-through: nudged a concrete work promise")
+        return held
+    except Exception:  # fail open: the original reply goes through untouched
+        logger.warning("follow-through: skipped a reply check")
     return response
 
 
