@@ -1,57 +1,46 @@
 # follow-through
 
-**An agent never ends a turn on a promise.**
+Nudge concrete work promises through the existing native agent loop.
 
-![follow-through demo still](docs/demo.png)
+When a final reply promises work, an `llm_execution` middleware turns it into a call to the plugin's `follow_through` tool. Deferred tools use Hermes' existing `tool_call` bridge. The tool asks the agent to give the result, report evidence of work already running, take an authorized action, or explain a blocker. It grants no authority and does not know whether work is running.
 
-When the model's final reply says work has started or will happen ("I've started the deep dive and will send you the report shortly") while nothing is running, the reply does not end the turn. An `llm_execution` middleware turns it into a call to the plugin's `follow_through` tool (through the Tool Search `tool_call` bridge when plugin tools are deferred). The tool result tells the agent to do the work now or actually launch it, so the loop really continues. A prompt can't do this: it can't stop a reply that's already written.
+- At most one nudge per user turn, including failed or unanswered tool calls.
+- Approval handoffs, offers, questions, negations and ordinary availability statements pass through.
+- English and Italian promise patterns; text matching can miss or misclassify a promise.
+- `FOLLOW_THROUGH_MAX_NUDGES=0` or `FOLLOW_THROUGH_OFF=1` disables nudges. The default and hard maximum are one; invalid numeric input uses the default.
+- Malformed or unsupported responses pass through. A failed rewrite leaves the original response intact; downstream request errors still propagate.
 
-- Zero model calls, fail-open, at most `FOLLOW_THROUGH_MAX_NUDGES` (default 2) per user turn
-- Offers and questions ("If you want, I'll...", "Should I...?"), negations and honest status are left alone
-- English and Italian promise patterns
-- Kill switch: `FOLLOW_THROUGH_OFF=1`
+## Permissions and execution
 
-## Disclosure
+The nudge preserves approval and consent requirements for sending, spending, scheduling and delegation. It asks for existing execution evidence rather than launching duplicate work. Routines remain offers until explicitly accepted. Native tool permissions and approval gates still apply.
 
-Registers one llm_execution middleware that reads each final model reply and, when it promises work while nothing is running, rewrites it into a call to its own follow_through tool (at most 2 per user turn; FOLLOW_THROUGH_OFF=1 disables); no network, no subprocesses, no files read or written, no model calls, no telemetry.
+The plugin makes no independent model request. Rewriting a reply into a tool call can continue the existing agent loop, including its normal model requests. The hook and tool perform no file, network or subprocess operations and keep no durable state. Generic diagnostic logs contain no draft quotation or exception details. The promise quotation stays in the ordinary tool-call history.
+
+The hook handles mutable chat-completions-style response objects. Unsupported response shapes are left unchanged; this is not a guarantee across every provider or streaming transport.
 
 ## Install
 
-Requires Hermes `>=0.21.6`.
+Requires Hermes `>=0.21.6`. Use Hermes' native plugin installer with a reviewed, full commit pin:
 
 ```bash
-cp -r follow-through ~/.hermes/plugins/        # or: hermes plugins install <repo-url>
-hermes plugins enable follow-through
-hermes plugins validate ~/.hermes/plugins/follow-through --install-deps
+hermes plugins install enckequity/follow-through --ref <reviewed-40-character-commit> --no-deps --no-enable
 ```
 
-## Example (real agent loop, scripted model: before / after)
+Review the native scanner result before enabling the plugin. Installation and enabling are separate steps; this repository does not change any engine, provider, job or schedule.
 
-This is the output of `probe.py` from the entry repo. It runs Hermes' own `AIAgent.run_conversation` against a
-deterministic local OpenAI-compatible model in a throwaway `HERMES_HOME`: once with the plugin disabled, once enabled.
+## Examples
 
-```text
-# follow-through: before/after probe on /usr/local/lib/hermes-agent (2026-11-05 01:01 UTC)
-user: Compare Postgres and SQLite for my side project.
-
-## BEFORE (plugin disabled)
-  user: Compare Postgres and SQLite for my side project.
-  assistant: Good question. I've started the deep dive on Postgres vs SQLite and will send you the full comparison shortly.
-  FINAL REPLY: Good question. I've started the deep dive on Postgres vs SQLite and will send you the full comparison shortly.
-
-## AFTER (plugin enabled)
-  user: Compare Postgres and SQLite for my side project.
-  assistant -> tool call tool_call({"calls": [{"name": "follow_through", "arguments": {"quote": "I've started the deep dive on Postgres vs SQLite and will send you the full comparison shortly."}}]})
-  assistant: Good question. I've started the deep dive on Postgres vs SQLite and will send you the full comparison shortly.
-  tool: [follow-through] Your draft tells the user that work has started or will happen: "I've started the deep dive on Postgres vs SQLite and will send you the full comparison shortly.". Nothing runs after you reply: when you answer, your work stops. Before you reply, do one of these now: (1) do that work in this turn and include its result; or (2) if it needs longer than this turn, actually laun ...
-  assistant: Done: Postgres wins for concurrent writes and rich queries; SQLite wins for a single-file, zero-ops deploy. For a side project with one writer: SQLite.
-  FINAL REPLY: Done: Postgres wins for concurrent writes and rich queries; SQLite wins for a single-file, zero-ops deploy. For a side project with one writer: SQLite.
-
-VERDICT: the plugin CHANGED the turn's final reply.
-```
+| Draft | Behavior |
+| --- | --- |
+| “I'll prepare the comparison now.” | One nudge asking for a result, existing execution evidence, an authorized action or a blocker. |
+| “I'll send the report after you approve.” | Passes through; approval remains pending. |
+| “I'll be available tomorrow.” | Passes through. |
+| A second promise after the nudge fails or has no result | Passes through; the issued nudge already reached the turn limit. |
 
 ## Tests
 
 ```bash
 python -m pytest -q tests
 ```
+
+Tests use synthetic replies and history. They cover direct and bridged nudges, approval language, turn limits, response-copy failures, downstream errors, log privacy and blocked file/network/process access. They do not make live model requests.
