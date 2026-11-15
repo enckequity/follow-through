@@ -31,7 +31,8 @@ _PROMISE = re.compile(
     r"look|check|review|analy[sz]e|finish|complete|do|turn|compile|draft|record|map|learn|practi[cs]e|master|"
     r"open|hand|pass|launch|kick off|spin up|set up|fix|land|ship|push|update|patch|wire|follow up)\b"
     r"|\b(?:running now|started|starting now|already started)\b"
-    r"|\b(?:keep|keeps) (?:digging|going|working|climbing|studying|learning)\b"
+    # Subjectless "Will keep digging." only: "keeps digging" describes someone else (a show's character, #2451).
+    r"|\bwill keep (?:digging|going|working|climbing|studying|learning)\b"
     r"|\b(?:report|come|get) back (?:to you|when|once|with|as soon)\b"
     r"|\bho (?:già )?(?:iniziato|cominciato|avviato|ripreso|lanciato)\b"
     r"|\bsto (?:lavorando|studiando|cercando|preparando|costruendo|analizzando|scavando|raccogliendo)\b"
@@ -172,6 +173,10 @@ def middleware(request: dict, next_call, **_: Any) -> Any:
         call = SimpleNamespace(
             id="call_ft_" + uuid.uuid4().hex[:12], type="function",
             function=SimpleNamespace(name=name, arguments=json.dumps(args)))
+        # The held draft must not travel with the call: a gateway delivers assistant text that comes with
+        # tool calls as interim commentary, so the draft reached the person and then the revised final
+        # followed it (two near-identical texts, enckequity/teamshift#2451). The quote is in the call.
+        choice.message.content = ""
         choice.message.tool_calls = [call]
         choice.finish_reason = "tool_calls"
         logger.info("follow-through: nudged a concrete work promise")

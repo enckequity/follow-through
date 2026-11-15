@@ -14,7 +14,7 @@ When a final reply promises work, an `llm_execution` middleware turns it into a 
 
 The nudge preserves approval and consent requirements for sending, spending, scheduling and delegation. It asks for existing execution evidence rather than launching duplicate work. Routines remain offers until explicitly accepted. Native tool permissions and approval gates still apply.
 
-The plugin makes no independent model request. Rewriting a reply into a tool call can continue the existing agent loop, including its normal model requests. The hook and tool perform no file, network or subprocess operations and keep no durable state. Generic diagnostic logs contain no draft quotation or exception details. The promise quotation stays in the ordinary tool-call history.
+The plugin makes no independent model request. Rewriting a reply into a tool call can continue the existing agent loop, including its normal model requests. The hook and tool perform no file, network or subprocess operations and keep no durable state. Generic diagnostic logs contain no draft quotation or exception details. The promise quotation stays in the ordinary tool-call history. The held draft itself is dropped from the rewritten reply, so a gateway that sends assistant text alongside tool calls as interim commentary never delivers it ahead of the revised answer.
 
 The hook handles mutable chat-completions-style response objects. Unsupported response shapes are left unchanged; this is not a guarantee across every provider or streaming transport.
 
