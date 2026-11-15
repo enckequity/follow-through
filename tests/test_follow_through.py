@@ -240,3 +240,20 @@ def test_only_native_tool_and_middleware_without_file_network_or_process_access(
     assert registered[0][1]["name"] == ft.TOOL
     assert registered[1][1] == ("llm_execution", ft.middleware)
     assert attempts == []
+
+
+def test_nudged_draft_is_not_sent_as_interim_commentary():
+    # enckequity/teamshift#2451: a held draft kept as content went out as an interim text, then the revised final followed it.
+    draft = "I've started the deep dive and will send you the full report once it's done."
+    r = run(draft)
+    assert r.choices[0].message.tool_calls and not r.choices[0].message.content
+    assert "deep dive" in json.loads(r.choices[0].message.tool_calls[0].function.arguments)["quote"]
+
+
+def test_third_person_description_is_not_a_promise():
+    # enckequity/teamshift#2451: a TV recommendation was nudged as a work promise.
+    for text in ("Ethan Hawke plays a rare-book dealer and freelance reporter in Tulsa who keeps digging into stories "
+                 "the town's powerful people want buried.", "She keeps working on the case.", "Keep going until it passes."):
+        assert ft.promise_sentence(text) is None, text
+    for text in ("Will keep digging and report back.", "I'll keep digging into the logs."):
+        assert ft.promise_sentence(text), text
